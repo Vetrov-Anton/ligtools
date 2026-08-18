@@ -1,0 +1,45 @@
+# Conda environment for ligtools, verified on linux-64.
+#
+#   conda env create -f environment.yml
+#   conda activate ligtools
+#
+# Two pins below are deliberate, do not relax them without testing:
+#   * psiresp-base, NOT psiresp - the `psiresp` metapackage additionally pulls
+#     qcfractal, which is only built for Python 3.9 and drags the whole
+#     environment back four releases. ligtools never talks to a QCFractal
+#     server: it runs the shell scripts psiresp writes, using Psi4 directly.
+#   * pydantic <2 - psiresp 0.4.2 is written against the pydantic v1 API and
+#     raises `PydanticUserError: A non-annotated attribute was detected` on
+#     import under v2. qcelemental follows the same split (0.50+ needs v2).
+name: ligtools
+channels:
+  - conda-forge
+dependencies:
+  - python=3.13
+  # Quantum chemistry backend.
+  #   * psi4 must stay <1.11: 1.11 requires pydantic >=2, which psiresp cannot use.
+  #   * libxc-c must stay <7.1: psi4 1.10.2 fails at import against libxc-c 7.1.2
+  #     with "Fatal Error: Could not find required LibXC functional", even though
+  #     its own metadata declares libxc-c >=7.0.0,<8.
+  - psi4=1.10.2
+  - libxc-c=7.0.0
+  # RESP2 charge fitting
+  - psiresp-base>=0.4.2
+  - pydantic<2
+  - qcelemental<0.50
+  # GAFF2 typing: provides antechamber / parmchk2 used by acpype
+  - ambertools>=26
+  - acpype>=2023.10.27
+  # Cheminformatics / topology handling
+  - rdkit>=2024.03
+  - mdanalysis>=2.9
+  - parmed>=4.3
+  - ipython>=8.0
+  # Optional: only needed for run_psi4(parallel=True)
+  - parallel
+  - pip
+  # NOTE: export OMP_NUM_THREADS=1 before running ligtools. psi4/MKL start
+  # OpenMP threads at import, and psiresp then forks worker processes; the
+  # children inherit a held mutex and deadlock on futex. See README.
+  - pip:
+      - git+https://github.com/Vetrov-Anton/ligtools.git

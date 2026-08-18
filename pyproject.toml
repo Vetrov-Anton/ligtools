@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ligtools"
+version = "0.2.0"
+description = "Ligand preparation for GROMACS/AMBER: SMILES to GAFF2 topologies with RESP2 charges, plus coordinate alignment onto a reference structure"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = { text = "MIT" }
+authors = [{ name = "Anton Vetrov" }]
+keywords = [
+    "molecular-dynamics",
+    "gromacs",
+    "amber",
+    "gaff2",
+    "resp",
+    "psi4",
+    "acpype",
+    "force-field",
+    "ligand-parameterization",
+    "structure-alignment",
+    "shape-alignment",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Chemistry",
+]
+
+# Pure-Python, pip-installable requirements only.
+# Psi4 and AmberTools (antechamber) are NOT on PyPI and must come from conda-forge;
+# see README.md ("Installation").
+dependencies = [
+    "numpy>=1.25",
+    "psiresp>=0.4.2",
+    # psiresp 0.4.x is written against the pydantic v1 API and fails to import
+    # under pydantic v2 ("A non-annotated attribute was detected"). qcelemental
+    # is pinned along with it: 0.50+ requires pydantic v2.
+    "pydantic<2",
+    "qcelemental<0.50",
+    "acpype>=2023.10.27",
+    "ParmEd>=4.3",
+    "MDAnalysis>=2.9",
+    "rdkit>=2024.03",
+    "ipython>=8.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "ruff>=0.1"]
+
+[project.urls]
+Homepage = "https://github.com/Vetrov-Anton/ligtools"
+Repository = "https://github.com/Vetrov-Anton/ligtools"
+Issues = "https://github.com/Vetrov-Anton/ligtools/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 120

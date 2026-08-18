@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+.venv/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# smi2gmx run output
+tmp_Smi2Gmx/
+output_param/
+*.acpype/
+temporary_pdbs/
+
+# Local backup of the pre-refactor script, not part of the package
+smi2gmx_old.py
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Psi4 leaves this behind when run from the repo root
+timer.dat
