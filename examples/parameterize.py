@@ -25,6 +25,8 @@ ligands = Smi2Gmx(
     smiles=list_smiles,
     res_names=list_names,
     work_dir='./output_param/',
+    n_conformer_pool=4000,     # Initial candidates per molecule, before filtering
+    n_conformer_threads=4,     # RDKit embedding threads
 )
 
 # Draw the input molecules (Jupyter/IPython only)

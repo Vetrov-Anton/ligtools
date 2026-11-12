@@ -16,27 +16,17 @@ from pathlib import Path
 import numpy as np
 import parmed as pmd
 
-# --- compatibility shim, must run before psiresp is used --------------------
-# psiresp 0.4.2 (its latest release) calls np.in1d in
-# psiresp/charge.py::add_constraints_from_charges, and NumPy 2.0 removed that
-# alias. psiresp passes 1-D index arrays there, for which np.isin is an exact
-# replacement. Restoring the alias is preferable to pinning the stack to
-# numpy<2, which would also drag Python back to 3.12 and RDKit back two years.
-if not hasattr(np, 'in1d'):
-    np.in1d = np.isin
-
-import psiresp
+from . import psiresp
 from IPython.display import display
 from parmed import gromacs
 from rdkit import Chem
 from rdkit.Chem import Draw
 from rdkit.Chem.Draw import IPythonConsole
 
-from acpype import topol
+from .acpype import topol
 
 from ._rdkit_utils import simplify_molecule
 
-psiresp.configs.RESP2 = True
 psiresp.grid.GridOptions.vdw_radii = {'Br': 3.95}
 
 IPythonConsole.ipython_useSVG = True
@@ -59,7 +49,7 @@ def _to_path(path):
 
 class Smi2Gmx:
     def __init__(self, smiles=[], res_names = [], max_conf_n = [], chiral = [], net_charges=[], ff_path='', atomtypes_filename='', ffnonbonded_filename = '',
-                work_dir = '', max_n_cores = 32):
+                work_dir = '', max_n_cores = 32, *, n_conformer_pool=4000, n_conformer_threads=1):
         self.smiles = smiles
         self.res_names = res_names
         self.n_mol = len(smiles)
@@ -69,6 +59,27 @@ class Smi2Gmx:
             self.max_conf_n = [5 for _ in smiles]
         else:
             self.max_conf_n = max_conf_n
+
+        if isinstance(n_conformer_pool, (list, tuple)):
+            pools = list(n_conformer_pool)
+            if len(pools) != self.n_mol:
+                raise ValueError('n_conformer_pool must have one value per SMILES')
+        else:
+            # Validate scalars even when no molecules were supplied.
+            psiresp.ConformerGenerationOptions(n_conformer_pool=n_conformer_pool)
+            pools = [n_conformer_pool] * self.n_mol
+        psiresp.ConformerGenerationOptions(n_threads=n_conformer_threads)
+        conformer_options = [
+            psiresp.ConformerGenerationOptions(
+                n_conformer_pool=pool,
+                n_threads=n_conformer_threads,
+                n_max_conformers=self.max_conf_n[i],
+                keep_original_conformer=False,
+            )
+            for i, pool in enumerate(pools)
+        ]
+        self.n_conformer_pool = pools
+        self.n_conformer_threads = n_conformer_threads
         
         if not chiral:
             self.chiral = [False for _ in smiles]
@@ -85,7 +96,12 @@ class Smi2Gmx:
         self.max_n_cores = max_n_cores
         # load smiles to psiresp
         if smiles:
-            self.mols = [psiresp.Molecule.from_smiles(mol, optimize_geometry=True,conformer_generation_options=dict(n_max_conformers=self.max_conf_n[i], keep_original_conformer=False)) for i,mol in enumerate(self.smiles)]
+            self.mols = [
+                psiresp.Molecule.from_smiles(
+                    mol, optimize_geometry=True, conformer_generation_options=conformer_options[i]
+                )
+                for i, mol in enumerate(self.smiles)
+            ]
             self.rdkit_mols = [Chem.MolFromSmiles(smile) for smile in self.smiles]
             if not net_charges:
                 self.net_charges = [mol.charge for mol in self.mols]

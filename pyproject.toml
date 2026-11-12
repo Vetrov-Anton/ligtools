@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=64", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,8 +7,9 @@ name = "ligtools"
 version = "0.2.0"
 description = "Ligand preparation for GROMACS/AMBER: SMILES to GAFF2 topologies with RESP2 charges, plus coordinate alignment onto a reference structure"
 readme = "README.md"
-requires-python = ">=3.11,<3.14"
-license = { text = "MIT" }
+requires-python = ">=3.11,<3.15"
+license = "GPL-3.0-only"
+license-files = ["LICENSE", "THIRD_PARTY.md", "src/ligtools/psiresp/LICENSE", "src/ligtools/acpype/LICENSE"]
 authors = [{ name = "Anton Vetrov" }]
 keywords = [
     "molecular-dynamics",
@@ -26,11 +27,11 @@ keywords = [
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Chemistry",
 ]
 
@@ -39,13 +40,13 @@ classifiers = [
 # see README.md ("Installation").
 dependencies = [
     "numpy>=1.25",
-    "psiresp>=0.4.2",
-    # psiresp 0.4.x is written against the pydantic v1 API and fails to import
-    # under pydantic v2 ("A non-annotated attribute was detected"). qcelemental
-    # is pinned along with it: 0.50+ requires pydantic v2.
-    "pydantic<2",
-    "qcelemental<0.50",
-    "acpype>=2023.10.27",
+    "pydantic>=2.11,<3",
+    "qcelemental>=0.50,<0.70",
+    "scipy>=1.11",
+    "tqdm>=4.60",
+    "requests>=2.28",
+    "msgpack>=1.0",
+    "typing-extensions>=4.12",
     "ParmEd>=4.3",
     "MDAnalysis>=2.9",
     "rdkit>=2024.03",
@@ -65,3 +66,7 @@ where = ["src"]
 
 [tool.ruff]
 line-length = 120
+
+[tool.setuptools.package-data]
+"ligtools.psiresp" = ["LICENSE"]
+"ligtools.acpype" = ["LICENSE"]

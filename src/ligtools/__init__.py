@@ -12,7 +12,7 @@ Two independent tools that are usually used one after the other:
     from ligtools import Smi2Gmx, CoordMatcher
 
 The two are imported lazily, so using CoordMatcher does not require Psi4,
-psiresp or acpype to be installed - it only needs RDKit, ParmEd and NumPy.
+the parameterization backends - it only needs RDKit, ParmEd, NumPy and IPython.
 """
 
 __version__ = '0.2.0'

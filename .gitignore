@@ -27,3 +27,7 @@ smi2gmx_old.py
 
 # Psi4 leaves this behind when run from the repo root
 timer.dat
+
+# Test tools
+.pytest_cache/
+.ruff_cache/

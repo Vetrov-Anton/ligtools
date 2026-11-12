@@ -56,49 +56,28 @@ Two of the dependencies are **not** available on PyPI and must be installed with
 | AmberTools (`antechamber`, `parmchk2`) | GAFF2 typing, used by acpype | `conda-forge` |
 | GNU `parallel` | only for `run_psi4(parallel=True)` | `conda-forge` / system package manager |
 
-Everything else is a normal Python dependency and is installed by pip:
-`psiresp`, `acpype`, `ParmEd`, `MDAnalysis`, `rdkit`, `ipython`.
+The maintained Python backends are included as `ligtools.psiresp` and
+`ligtools.acpype`; do not install upstream `psiresp` or `acpype` separately.
+Other Python dependencies are installed by pip. Open Babel is also needed for
+PDB-to-MOL2 conversion in the parameterization workflow (install with conda).
 
-**Python 3.11-3.13.** The upper bound is Psi4, which has no Python 3.14 build yet.
+**Python 3.11–3.14.** Unit and numerical regression tests cover this range.
+Availability of Psi4/AmberTools binaries additionally depends on the platform.
 
-### Verified stack
+### Maintained backends
 
-The environment below was installed and imported successfully on linux-64:
+The code originally released as psiresp 0.4.2 and acpype 2023.10.27 now lives in
+`src/ligtools/psiresp/` and `src/ligtools/acpype/`. It is built and versioned with
+ligtools, without upstream setup.py, Versioneer, or bundled Amber executables.
 
-| Package | Version |
-| --- | --- |
-| Python | 3.13.15 |
-| Psi4 | 1.10.2 (pinned) |
-| AmberTools | 26.0 |
-| psiresp | 0.4.2 (`psiresp-base`) |
-| acpype | 2023.10.27 |
-| RDKit | 2026.03.1 |
-| MDAnalysis | 2.10.0 |
-| ParmEd | 4.3.1 |
-| NumPy | 2.5.2 |
-| libxc-c | 7.0.0 (pinned) |
-| pydantic | 1.10.22 (pinned, see below) |
-| qcelemental | 0.30.1 (pinned, see below) |
+The RESP backend uses Pydantic 2 and QCElemental's explicit v2 models, NumPy
+`isin`, and SciPy's public sparse solver. QCSchema v1 conversion is kept at the
+Psi4 file boundary. Pydantic 1 and the old `qcelemental<0.50` constraint are no
+longer required. ACPYPE resolves AmberTools from the active environment.
 
-Four pins are deliberate:
-
-- **`psiresp-base`, not `psiresp`.** The `psiresp` metapackage additionally pulls `qcfractal`,
-  which is only built for Python 3.9 and would drag the entire environment back four releases.
-  ligtools never talks to a QCFractal server - it executes the shell scripts psiresp writes,
-  calling Psi4 directly - so the base package is all that is needed.
-- **`pydantic<2` (and therefore `qcelemental<0.50`).** psiresp 0.4.2 is written against the
-  pydantic v1 API and fails on import under v2 with
-  `PydanticUserError: A non-annotated attribute was detected`.
-- **`psi4<1.11`.** Psi4 1.11 requires pydantic v2, which psiresp cannot use. 1.10.2 declares
-  `pydantic >=1.10.17,<3` and works with v1.
-- **`libxc-c<7.1`.** Psi4 1.10.2 aborts at import against libxc-c 7.1.2 with
-  `Fatal Error: Could not find required LibXC functional`, even though its own metadata accepts
-  `libxc-c >=7.0.0,<8`. libxc-c 7.0.0 works.
-
-ligtools also installs a one-line compatibility shim at import (`np.in1d = np.isin`): psiresp
-calls `np.in1d`, removed in NumPy 2.0. That single call is the only NumPy 2 incompatibility in
-psiresp, so shimming it is much cheaper than pinning `numpy<2`, which would drag Python back to
-3.12 and RDKit back two years.
+See [THIRD_PARTY.md](THIRD_PARTY.md) for provenance, licenses, and maintenance
+instructions. These changes preserve the existing scientific configuration;
+they do not change the charge-fitting method or its defaults.
 
 ---
 
@@ -107,10 +86,9 @@ psiresp, so shimming it is much cheaper than pinning `numpy<2`, which would drag
 ### Recommended: conda environment + pip
 
 ```bash
-# 1. Get the non-PyPI dependencies (note: psiresp-base and pydantic<2, see above)
-conda create -n ligtools -c conda-forge python=3.13 'psi4=1.10.2' 'libxc-c=7.0.0' \
-                                       psiresp-base 'pydantic<2' ambertools acpype \
-                                       rdkit mdanalysis parmed ipython parallel pip
+# 1. Install the external quantum chemistry and topology tools
+conda create -n ligtools -c conda-forge python=3.13 'psi4>=1.11,<1.12' \
+    ambertools openbabel parallel pip
 conda activate ligtools
 
 # 2. Install ligtools itself
@@ -145,8 +123,11 @@ python -c "import ligtools; print(ligtools.__version__)"
 which psi4 antechamber parmchk2
 ```
 
-If `import psiresp` raises `PydanticUserError`, pydantic v2 slipped into the environment;
-fix it with `conda install -n ligtools 'pydantic<2'`.
+To check the included backends:
+
+```bash
+python -c "from ligtools import Smi2Gmx, CoordMatcher; from ligtools import psiresp, acpype"
+```
 
 If `psi4` is not on your `$PATH`, either pass its location explicitly
 (`ligands.run_psi4(psi4_path='/path/to/psi4')`) or export `PSI4_EXE=/path/to/psi4`.
@@ -236,6 +217,8 @@ finished stages are picked up from `work_dir` instead of being recomputed.
 | `smiles` | `[]` | List of SMILES strings to parameterize. |
 | `res_names` | `[]` | GROMACS residue name per molecule (required). |
 | `max_conf_n` | `5` each | Maximum number of conformers per molecule. |
+| `n_conformer_pool` | `4000` | Initial conformer candidates per molecule, before filtering; a positive integer or a list with one positive integer per SMILES. |
+| `n_conformer_threads` | `1` | Positive number of RDKit threads for conformer embedding and optional force-field minimization. |
 | `chiral` | `False` each | Pass acpype's chirality flag for that molecule. |
 | `net_charges` | from SMILES | Total charge per molecule; overrides the value RDKit infers. |
 | `ff_path` | `''` | Force field directory used by `get_ff_with_rtps()` when it is called without arguments. |
@@ -246,6 +229,26 @@ finished stages are picked up from `work_dir` instead of being recomputed.
 
 All path arguments accept `str` or `pathlib.Path`, relative or absolute, with `~` expansion;
 they are resolved to absolute paths on construction.
+
+For example, generate up to 200 initial candidates for each molecule on four
+RDKit threads, then keep at most five per molecule for QM:
+
+```python
+ligands = Smi2Gmx(
+    smiles=['CC(=O)C(=O)[O-]', 'CC(=O)P(C)(=O)[O-]'],
+    res_names=['PYR', 'MPI'],
+    n_conformer_pool=200,       # Or [200, 500] for separate pool sizes
+    n_conformer_threads=4,
+    max_conf_n=[5, 5],
+    max_n_cores=2,             # Separate limit for QM/acpype workers
+)
+```
+
+Embedding can produce fewer candidates because RDKit prunes similar geometries
+or cannot embed a requested conformation. Molecules are processed in sequence;
+`n_conformer_threads` controls RDKit threads within each molecule and requires a
+build of RDKit with thread support. Energy and RMSD selection still run serially,
+so increasing this setting does not accelerate every part of conformer selection.
 
 ### Methods
 
@@ -337,4 +340,6 @@ published work.
 
 ## License
 
-MIT - see [LICENSE](LICENSE).
+Original ligtools code: MIT — see [LICENSE](LICENSE).
+Included psiresp code: LGPL-3.0; included acpype code: GPL-3.0.
+The combined distribution is GPL-3.0; see [THIRD_PARTY.md](THIRD_PARTY.md).
