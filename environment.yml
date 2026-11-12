@@ -12,8 +12,8 @@ dependencies:
   - mdanalysis>=2.9
   - parmed>=4.3
   - ipython>=8.0
+  - ipykernel>=6
   - openbabel
-  - parallel
   - pip
   - pip:
       - .

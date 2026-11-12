@@ -42,7 +42,7 @@ new residues already injected (`.rtp` entries, new atom types in `atomtypes.atp`
 - Output as GROMACS `.itp`, `.gro`, `.pdb` and — unlike plain acpype — **`.rtp`** residue
   entries, so ligands can be built by `gmx pdb2gmx` like any standard residue
 - Optional injection of the new residues and atom types into an existing `*.ff` directory
-- Parallel execution of the QM step (GNU `parallel`) and of the acpype step (`multiprocessing`)
+- Parallel QM execution with Python’s standard library and parallel ACPYPE workers
 
 ---
 
@@ -54,7 +54,6 @@ Two of the dependencies are **not** available on PyPI and must be installed with
 | --- | --- | --- |
 | Psi4 | QM optimization and single points | `conda-forge` |
 | AmberTools (`antechamber`, `parmchk2`) | GAFF2 typing, used by acpype | `conda-forge` |
-| GNU `parallel` | only for `run_psi4(parallel=True)` | `conda-forge` / system package manager |
 
 The maintained Python backends are included as `ligtools.psiresp` and
 `ligtools.acpype`; do not install upstream `psiresp` or `acpype` separately.
@@ -88,7 +87,7 @@ they do not change the charge-fitting method or its defaults.
 ```bash
 # 1. Install the external quantum chemistry and topology tools
 conda create -n ligtools -c conda-forge python=3.13 'psi4>=1.11,<1.12' \
-    ambertools openbabel parallel pip
+    ambertools openbabel pip
 conda activate ligtools
 
 # 2. Install ligtools itself
@@ -134,19 +133,21 @@ If `psi4` is not on your `$PATH`, either pass its location explicitly
 
 ---
 
-## Required: single-threaded BLAS
+## Jupyter and parallel execution
 
-```bash
-export OMP_NUM_THREADS=1
-```
+Run the API directly in notebook cells; no `OMP_NUM_THREADS`, BLAS settings or
+multiprocessing configuration is required. ESP and parallel ACPYPE workers start
+fresh Python interpreters with the local `spawn` context. Their BLAS/OpenMP thread
+limits are applied inside the workers, without changing the notebook environment
+or the thread count used by RDKit conformer generation.
 
-**Without this, ligtools deadlocks.** Psi4/MKL start OpenMP threads when they are imported;
-psiresp then forks worker processes, and each child inherits a mutex that was held at fork time
-by a thread that does not exist in the child. Every worker blocks on `futex` forever, at 0% CPU,
-with no error message.
+`max_n_cores` limits the number of ESP, QM and ACPYPE workers. Existing ESP
+results are reused without starting a worker pool. A notebook example is in
+[`examples/parameterize.ipynb`](examples/parameterize.ipynb).
 
-This costs nothing in practice: the QM work runs in separate `psi4` processes, and ligtools
-parallelizes across conformers with `run_psi4(parallel=True)` rather than across threads.
+For standalone Python scripts, put the calls inside a function and invoke it
+under `if __name__ == "__main__":`, as in `examples/parameterize.py`. This guard
+is needed for spawn in scripts; notebook cells do not need it.
 
 ## Quick start
 
@@ -183,7 +184,7 @@ A complete, commented script is in [`examples/parameterize.py`](examples/paramet
 
 | Step | Method | What happens |
 | --- | --- | --- |
-| 1 | `run_psi4()` | psiresp generates conformers, Psi4 optimizes them and computes the ESP grid. Because psiresp stops and writes shell scripts instead of blocking, `ligtools` rewrites `run_optimization.sh` / `run_single_point.sh` with absolute paths and executes them (through GNU `parallel` when `parallel=True`). |
+| 1 | `run_psi4()` | psiresp generates conformers, Psi4 optimizes them and computes the ESP grid. Python schedules the external Psi4 processes directly, up to `max_n_cores` at once. Each calculation has a `.psi4.log`; failed exit codes and failed QCSchema results raise an error. No shell or GNU `parallel` is used. |
 | 2 | `run_resp()` | Symmetry-equivalent atoms are found with `Chem.CanonicalRankAtoms` on a "flattened" copy of the molecule (all bonds single, no formal charges), so e.g. the three methyl hydrogens or the two carboxylate oxygens share one charge. Net charge is constrained per molecule. |
 | 3 | `run_acpype()` | Each molecule is written as a PDB with the requested residue name and passed to acpype (`chargeType='user'`), which derives GAFF2 atom types and bonded parameters. |
 | 4 | `get_*()` | Results are collected; `get_itps()` overwrites acpype's charges with the RESP2 ones. |
@@ -225,7 +226,7 @@ finished stages are picked up from `work_dir` instead of being recomputed.
 | `atomtypes_filename` | `''` | Stored for reference (see note below). |
 | `ffnonbonded_filename` | `''` | Stored for reference (see note below). |
 | `work_dir` | `./tmp_Smi2Gmx` | Working directory for all intermediate and output files. |
-| `max_n_cores` | `32` | Upper bound on parallel workers for the QM and acpype steps. |
+| `max_n_cores` | `32` | Upper bound on parallel workers for QM, ESP and ACPYPE. |
 
 All path arguments accept `str` or `pathlib.Path`, relative or absolute, with `~` expansion;
 they are resolved to absolute paths on construction.

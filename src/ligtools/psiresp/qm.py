@@ -3,6 +3,7 @@ import time
 import pathlib
 import logging
 import sys
+import shlex
 from typing import List, Optional, Dict, Any, Union
 
 import numpy as np
@@ -15,6 +16,14 @@ from .base import Model
 from .qcutils import QCWaveFunction
 
 logger = logging.getLogger(__name__)
+
+
+class QMTasksPending(SystemExit):
+    """External QM inputs awaiting execution; paths are passed without shell parsing."""
+
+    def __init__(self, paths, runfile):
+        self.paths = tuple(pathlib.Path(path).resolve() for path in paths)
+        super().__init__(f'Exiting to allow running QM computations; commands are in {runfile}')
 
 
 #: A limited list of QM methods in Psi4
@@ -309,7 +318,7 @@ class BaseQMOptions(Model):
                     results.append(result)
         if to_execute:
             logger.debug(f"{len(to_execute)} calculations remaining")
-            lines = ["#!/usr/bin/env bash"] + [f"psi4 --qcschema {path.name}" for path in to_execute]
+            lines = ["#!/usr/bin/env bash"] + [f"psi4 --qcschema {shlex.quote(path.name)}" for path in to_execute]
             runfile = self.get_run_file(working_directory)
             with runfile.open("w") as f:
                 f.write("\n".join(lines))
@@ -319,8 +328,7 @@ class BaseQMOptions(Model):
             raise ValueError(f"Found {len(errors)} errors", *errors)
 
         if to_execute:
-            raise SystemExit("Exiting to allow running QM computations; "
-                             f"commands are in {runfile}")
+            raise QMTasksPending(to_execute, runfile)
         return results
 
     def read_output(self, qcmol, working_directory=".",
@@ -336,7 +344,7 @@ class BaseQMOptions(Model):
         if "success" not in data:
             raise FileNotFoundError(f"QM input has not been computed yet: {infile}")
         if not data.get("success", False):
-            raise ValueError(data.get("error", "QM result is incomplete"))
+            raise ValueError(f'QM calculation failed for {infile}: {data.get("error", "incomplete result")}')
         if data.get("model", {}).get("basis") == "":
             data["model"]["basis"] = None
         if "provenance" not in data:

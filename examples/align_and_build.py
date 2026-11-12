@@ -1,7 +1,6 @@
 """Place a parameterized ligand into a binding site and rebuild the complex.
 
 Run this after `parameterize.py` has produced the ligand PDB.
-Remember to `export OMP_NUM_THREADS=1` (see README).
 """
 
 from ligtools import CoordMatcher

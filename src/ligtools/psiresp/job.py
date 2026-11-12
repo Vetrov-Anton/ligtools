@@ -3,6 +3,8 @@ import multiprocessing
 import itertools
 import pathlib
 import logging
+from concurrent.futures import ProcessPoolExecutor
+import os
 
 import tqdm
 from pydantic import Field  # , validator, root_validator
@@ -15,8 +17,24 @@ from .resp import RespCharges
 from .orientation import Orientation
 from .constraint import ESPSurfaceConstraintMatrix
 from .utils import require_package
+from .._parallel import initialize_esp_worker
 
 logger = logging.getLogger(__name__)
+
+
+def _compute_esp_worker(task):
+    """Importable target: works with spawn from a notebook cell."""
+    orientation, grid_options, defer_errors = task
+    try:
+        if orientation.grid is None:
+            orientation.compute_grid(grid_options=grid_options)
+        orientation.compute_esp()
+        assert orientation.esp is not None
+        return orientation
+    except Exception as error:
+        if defer_errors:
+            return str(error)
+        raise
 
 
 class Job(base.Model):
@@ -76,6 +94,8 @@ class Job(base.Model):
 
     n_processes: Optional[int] = Field(
         default=None,
+        ge=1,
+        strict=True,
         description=("Number of processes to use in multiprocessing "
                      "during ESP computation. `n_processes=None` uses "
                      "the number of CPUs.")
@@ -168,19 +188,24 @@ class Job(base.Model):
             orient.qc_wavefunction = wfn
 
     def compute_esps(self):
-        """Compute ESP on a grid for each orientation in a multiprocessing pool"""
+        """Compute ESP in fresh interpreters, without forking notebook threads."""
         orientations = [orientation
                         for mol in self.molecules
                         for conformer in mol.conformers
                         for orientation in conformer.orientations
                         if orientation.esp is None]
-        tqorientations = tqdm.tqdm(orientations,
-                                   desc="compute-esp")
-        # create functions for multiprocessing mapping
-        computer = self._try_compute_esp if self.defer_errors else self._compute_esp
-
-        with multiprocessing.Pool(processes=self.n_processes) as pool:
-            results = pool.map(computer, tqorientations)
+        if not orientations:
+            return
+        workers = min(self.n_processes or os.cpu_count() or 1, len(orientations))
+        tasks = ((orientation, self.grid_options, self.defer_errors) for orientation in orientations)
+        with ProcessPoolExecutor(
+            max_workers=workers,
+            mp_context=multiprocessing.get_context('spawn'),
+            initializer=initialize_esp_worker,
+        ) as pool:
+            results = list(tqdm.tqdm(
+                pool.map(_compute_esp_worker, tasks), total=len(orientations), desc='compute-esp'
+            ))
 
         # raise errors if any occurred
         errors = [r for r in results if not isinstance(r, Orientation)]

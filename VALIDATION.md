@@ -1,5 +1,49 @@
 # Local backend validation — 2026-11-13
 
+## Python QM scheduler
+
+GNU parallel is no longer a runtime dependency. Python launches Psi4 with
+argument lists through subprocess, using a bounded ThreadPoolExecutor to wait
+for independent external calculations. Each Psi4 process explicitly uses one
+thread; `max_n_cores` bounds simultaneous calculations. `parallel=False` runs
+QM commands sequentially. Shell scripts are not parsed or executed by this path.
+
+32 unit/numerical tests passed on Python 3.11–3.14. New tests launch real stub
+executables and check concurrency, sequential execution, staged ordering, reuse
+of completed calculations, paths containing spaces and shell metacharacters,
+nonzero exits, missing output, missing executables and propagation of unrelated
+exceptions and interrupts.
+
+The full four-ligand Jupyter test passed in 56.95 seconds without thread-limit
+environment variables. A failing stand-in for the `parallel` executable was
+placed first on PATH; it was never invoked. All pipeline output checks passed.
+The run log is in `ligtools-audit/python-qm-notebook.log` beside this repository.
+
+## Notebook-safe parallel execution
+
+ESP and parallel ACPYPE now use explicit spawn contexts and importable library
+targets. Native thread limits are configured automatically inside workers only;
+the notebook's environment and Psi4 thread count are preserved. The standalone
+example has a main guard; the notebook example requires no such guard.
+
+24 unit/numerical tests passed on Python 3.11–3.14, including a live parent
+thread, warmed-up BLAS and a real spawned worker whose native thread pools are
+limited automatically. Cached ESPs do not create a pool.
+
+`tests/test_notebook.py` passed in 57.25 seconds in a real ipykernel with
+OMP_NUM_THREADS, OPENBLAS_NUM_THREADS and MKL_NUM_THREADS absent. The kernel
+imported Psi4, set its parent thread count to two and warmed up NumPy before
+executing all stages for all four example ligands (initial pool 20, RDKit threads
+2), including **parallel** ACPYPE. The test checked atom counts, charge sums,
+coordinates, output files and force-field insertion, then verified that the
+parent environment and Psi4 thread count were unchanged.
+
+The executed notebook was saved under
+`/tmp/ligtools-notebook-validation/test_jupyter_without_thread_en0/executed.ipynb`;
+the run log is in the adjacent `ligtools-audit/notebook-validation.log`.
+Older thread-limited runs below document earlier validation, not a current
+requirement to set environment variables.
+
 ## Conformer controls
 
 After adding `n_conformer_pool` and `n_conformer_threads`, 22 tests passed on

@@ -7,10 +7,11 @@ directory.
 """
 
 import os
-import shlex
 import shutil
+import subprocess
 from collections import defaultdict
-from multiprocessing import Pool
+from multiprocessing import get_context
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -26,6 +27,7 @@ from rdkit.Chem.Draw import IPythonConsole
 from .acpype import topol
 
 from ._rdkit_utils import simplify_molecule
+from ._parallel import initialize_worker
 
 psiresp.grid.GridOptions.vdw_radii = {'Br': 3.95}
 
@@ -204,87 +206,64 @@ class Smi2Gmx:
         
         
 
-    def run_psi4(self, psi4_path=DEFAULT_PSI4, parallel = True):
-        # keep a bare executable name usable (it may be resolved through $PATH)
-        psi4 = shutil.which(psi4_path) or str(Path(psi4_path).expanduser())
+    @staticmethod
+    def _run_psi4_input(psi4, input_path):
+        log_path = input_path.with_suffix('.psi4.log')
+        with log_path.open('w') as log:
+            result = subprocess.run(
+                [psi4, '--qcschema', str(input_path), '--nthread', '1'],
+                cwd=input_path.parent, stdout=log, stderr=subprocess.STDOUT,
+                check=False,
+            )
+        if result.returncode:
+            raise RuntimeError(
+                f'Psi4 exited with code {result.returncode} for {input_path}; log: {log_path}'
+            )
 
-        opt_dir = self.work_dir / 'optimization'
-        opt_script = opt_dir / 'run_optimization.sh'
-        sp_dir = self.work_dir / 'single_point'
-        sp_script = sp_dir / 'run_single_point.sh'
-
-        if parallel:
-            self.job = psiresp.Job(molecules=self.mols, working_directory=str(self.work_dir))
-
-            # OPTIMIZATION PARALLEL
-
+    def _run_qm_stage(self, action, psi4, workers):
+        try:
+            action()
+        except psiresp.qm.QMTasksPending as pending:
+            paths = pending.paths
+            print(f'Running {len(paths)} Psi4 calculations with up to {workers} workers')
+            if workers == 1:
+                for path in paths:
+                    self._run_psi4_input(psi4, path)
+            else:
+                # Threads only wait for independent external executables.
+                with ThreadPoolExecutor(max_workers=min(workers, len(paths))) as pool:
+                    futures = [pool.submit(self._run_psi4_input, psi4, path) for path in paths]
+                    try:
+                        for future in as_completed(futures):
+                            future.result()
+                    except BaseException:
+                        for future in futures:
+                            future.cancel()
+                        raise
+            # Validate QCSchema results as well as the process exit codes.
             try:
-                self.job.run()
-            except:
-                print('Geometry optimization has started')
-                with open(opt_script, 'r') as f:
-                    lines = f.readlines()[1:]
-                    msgpacks = [line.strip().split()[-1] for line in lines]
-                with open(opt_script, 'w') as f:
-                    for msgpack in msgpacks:
-                        print(f'{shlex.quote(psi4)} --qcschema {shlex.quote(str(opt_dir / msgpack))}', file=f)
+                action()
+            except psiresp.qm.QMTasksPending as incomplete:
+                raise RuntimeError(
+                    f'Psi4 finished without producing required results: {incomplete.paths}; '
+                    'see the corresponding .psi4.log files'
+                ) from incomplete
 
-
-                os.system(f'parallel --jobs {self.max_n_cores} --gnu "{{}}" :::: {shlex.quote(str(opt_script))}')
-
-            # SINGLE POINTS PARALLEL
-
-            try:
-                self.job.run()
-            except:
-                print('Single point calculations have started')
-                with open(sp_script, 'r') as f:
-                    lines = f.readlines()[1:]
-                    msgpacks = [line.strip().split()[-1] for line in lines]
-                with open(sp_script, 'w') as f:
-                    for msgpack in msgpacks:
-                        print(f'{shlex.quote(psi4)} --qcschema {shlex.quote(str(sp_dir / msgpack))}', file=f)
-
-
-                os.system(f'parallel --jobs {self.max_n_cores} --gnu "{{}}" :::: {shlex.quote(str(sp_script))}')
-       #################################################################################################################################################
-        # WITHOUT PARALLEL
-        else:
-            self.job = psiresp.Job(molecules=self.mols, working_directory=str(self.work_dir))
-
-            # OPTIMIZATION
-
-            try:
-                self.job.run()
-            except:
-                print('Geometry optimization has started')
-                with open(opt_script, 'r') as f:
-                    lines = f.readlines()[1:]
-                    msgpacks = [line.strip().split()[-1] for line in lines]
-                with open(opt_script, 'w') as f:
-                    for msgpack in msgpacks:
-                        print(f'{shlex.quote(psi4)} --qcschema {shlex.quote(str(opt_dir / msgpack))}', file=f)
-
-
-                os.system(f'bash {shlex.quote(str(opt_script))}')
-
-            # SINGLE POINTS
-
-            try:
-                self.job.run()
-            except:
-                print('Single point calculations have started')
-                with open(sp_script, 'r') as f:
-                    lines = f.readlines()[1:]
-                    msgpacks = [line.strip().split()[-1] for line in lines]
-                with open(sp_script, 'w') as f:
-                    for msgpack in msgpacks:
-                        print(f'{shlex.quote(psi4)} --qcschema {shlex.quote(str(sp_dir / msgpack))}', file=f)
-
-
-                os.system(f'bash {shlex.quote(str(sp_script))}')
-
-
+    def run_psi4(self, psi4_path=DEFAULT_PSI4, parallel=True):
+        """Run optimization and single points using Python's external-process scheduler."""
+        executable = shutil.which(str(Path(psi4_path).expanduser()))
+        if executable is None:
+            raise FileNotFoundError(f'Psi4 executable not found: {psi4_path}')
+        executable = str(Path(executable).resolve())
+        self.job = psiresp.Job(
+            molecules=self.mols, working_directory=str(self.work_dir),
+            n_processes=self.max_n_cores,
+        )
+        workers = self.max_n_cores if parallel else 1
+        self.job.generate_conformers()
+        self._run_qm_stage(self.job.optimize_geometries, executable, workers)
+        self.job.generate_orientations()
+        self._run_qm_stage(self.job.compute_orientation_energies, executable, workers)
 
     def run_resp(self, constraints=[]):
         if constraints == []:
@@ -335,8 +314,11 @@ class Smi2Gmx:
                 print(tasks)
 
                 n_proc =  len(self.res_names) if len(self.res_names) < self.max_n_cores else self.max_n_cores
-                with Pool(processes=n_proc) as pool:
-                    pool.map(self._parallel_acpype, tasks)
+                if tasks:
+                    with ProcessPoolExecutor(
+                        max_workers=n_proc, mp_context=get_context('spawn'), initializer=initialize_worker,
+                    ) as pool:
+                        list(pool.map(self._parallel_acpype, tasks))
             finally:
                 os.chdir(previous_dir)
         else:

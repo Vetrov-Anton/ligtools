@@ -10,6 +10,7 @@ import numpy as np
 try:
     from rdkit import Chem
     from rdkit.Chem import AllChem
+    from rdkit.Chem.rdmolfiles import SmilesParserParams
 except ImportError:
     raise ImportError("rdkit is necessary for this functionality. "
                       "Please install it with "
@@ -33,7 +34,7 @@ OFF_SMILES_ATTRIBUTE = "canonical_isomeric_explicit_hydrogen_mapped_smiles"
 
 
 def rdmol_from_smiles(smiles, order_by_map_number: bool = False):
-    smiles_parser = Chem.rdmolfiles.SmilesParserParams()
+    smiles_parser = SmilesParserParams()
     smiles_parser.removeHs = False
     rdmol = Chem.AddHs(Chem.MolFromSmiles(smiles, smiles_parser))
     if order_by_map_number:

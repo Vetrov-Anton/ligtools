@@ -31,6 +31,13 @@ binaries are excluded. Psi4, AmberTools and Open Babel remain external programs.
   fallback for singular systems. NumPy block arrays replace deprecated matrices.
 - Removed the ineffective assignment that replaced the RESP2 configuration class
   with a boolean; the existing pipeline still uses Job with its existing defaults.
+- ESP and ACPYPE workers use a local spawn context with worker-local native
+  thread limits. Notebook users do not need BLAS environment variables.
+- QM inputs are passed as structured paths to Python's subprocess scheduler,
+  without shell parsing or GNU parallel. Only the specific pending-QM signal
+  triggers external execution; other errors propagate. Process exit codes and
+  returned QCSchema results are checked. Upstream shell scripts are retained
+  only as an optional aid for manual execution.
 - The public `Smi2Gmx` and `CoordMatcher` imports and scientific defaults are
   preserved. Optional legacy QCFractal integrations are not covered by our tests.
 
@@ -52,6 +59,5 @@ External integration test (20 initial conformers per ligand, all four example
 ligands and all pipeline stages; an isolated force-field copy is used):
 
 ```bash
-OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \
 LIGTOOLS_FORCEFIELD=/path/to/amber99sb-ildn.ff python -m pytest -q tests
 ```
