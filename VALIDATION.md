@@ -1,5 +1,63 @@
 # Local backend validation — 2026-11-13
 
+## Fresh conda installation audit
+
+Both installation paths were executed online with conda's libmamba solver on
+Linux x86_64. Existing environments were not modified. The README's named
+environment was replaced only by a separate audit prefix to avoid name collisions.
+
+| Installation path | Isolated prefix | Result |
+| --- | --- | --- |
+| README: conda create + pip install from GitHub | `/tmp/ligtools-install-readme` | Installed; 33 tests passed in 57.70 s |
+| conda env create -f environment.yml | `/tmp/ligtools-install-yaml` | Installed; 33 tests passed in 60.09 s |
+
+The Git installation resolved to commit
+`4d4615decd86b4b7a1bc71d33d54c1ca2c4adc24`. The YAML installation built the local
+checkout at that same commit. Imports were checked from outside the checkout;
+`ligtools.__file__` pointed inside the tested environment's site-packages.
+Psi4, antechamber, parmchk2, tleap and obabel also resolved inside each prefix.
+
+Both environments selected Python 3.13.18, Psi4 1.11, AmberTools 26.0, NumPy
+2.5.4, Pydantic 2.14.3, QCElemental 0.51.4, SciPy 1.18.1, RDKit 2026.09.2,
+ParmEd 4.3.1 and MDAnalysis 2.11.0. Installed local backends were
+`psiresp 0.4.2+ligtools.1` and `acpype 2023.10.27+ligtools.1`.
+
+The initial README commands did not install ipykernel. Installing it with
+`python -m pip install ipykernel` succeeded; kernel registration was tested with
+an isolated `--prefix /tmp/ligtools-kernel-registration` rather than modifying the
+user's global kernels. README now includes notebook kernel installation and
+registration. The YAML already includes ipykernel.
+
+Baseline import/executable/conformer checks ran before installing test tools.
+For the test suite, pytest, nbclient and nbformat were subsequently installed
+(and ipykernel in the README environment). Tests exercised the installed package,
+not an editable checkout. Each 33-test run included the actual Jupyter
+four-ligand integration test with pool size 20, RDKit threads 2, parallel QM,
+parallel ACPYPE and all output/charge checks. The duplicate standalone integration
+test was excluded because its same assertions run inside that notebook.
+
+`pip check` is **not clean**: initially it reported nine issues for the README
+environment and seven for the YAML environment. They concern bundled AmberTools
+auxiliary programs: fetkutils, proprep, ndfes, edgembar and packmol-memgen, with
+NumPy/Biopython constraints or missing netCDF4/pdb2pqr. No ligtools dependency
+conflicts were reported. Successful pipeline execution does not validate those
+other tools; no package metadata was removed to hide the conflicts.
+
+| Auxiliary package | Requirement | Observed installation |
+| --- | --- | --- |
+| fetkutils, ndfes | NumPy <2; netCDF4 | NumPy 2.5.4; netCDF4 missing in the manual environment, present in the YAML environment |
+| edgembar | NumPy <2 | NumPy 2.5.4 |
+| proprep | NumPy <2; Biopython >=1.83,<1.86; pdb2pqr >=3.5 | NumPy 2.5.4, Biopython 1.88, pdb2pqr missing |
+| packmol-memgen | pdb2pqr | Missing in both environments |
+
+These requirements may prevent the auxiliary programs from working; they are
+not treated as harmless warnings. The antechamber/parmchk2/tleap workflow used
+by ligtools passed the integration test, while these other programs remain
+unverified.
+
+Commands, complete conda/pip logs, baseline checks, test logs and final package
+snapshots are in the adjacent `ligtools-audit/installation/` directory.
+
 ## Python QM scheduler
 
 GNU parallel is no longer a runtime dependency. Python launches Psi4 with

@@ -91,8 +91,15 @@ conda create -n ligtools -c conda-forge python=3.13 'psi4>=1.11,<1.12' \
 conda activate ligtools
 
 # 2. Install ligtools itself
-pip install git+https://github.com/Vetrov-Anton/ligtools.git
+python -m pip install git+https://github.com/Vetrov-Anton/ligtools.git
+
+# 3. For Jupyter, install and register the environment's kernel
+python -m pip install ipykernel
+python -m ipykernel install --user --name ligtools --display-name "Python (ligtools)"
 ```
+
+Select **Python (ligtools)** in your notebook. If you only use standalone Python
+scripts, step 3 is optional. No BLAS environment settings are needed.
 
 `mamba` (or Miniforge, which ships it) is strongly recommended over plain `conda` here:
 the environment is ~3.6 GB and 245 packages, and the classic solver is slow on it.
@@ -106,13 +113,25 @@ conda env create -f environment.yml     # installs the dependencies *and* ligtoo
 conda activate ligtools
 ```
 
+This environment file already includes `ipykernel`. If Jupyter runs from another
+environment, register this kernel using the `python -m ipykernel install` command
+above and select **Python (ligtools)**.
+
+Both installation paths were tested from fresh environments on Linux with
+Python 3.13.18, Psi4 1.11 and AmberTools 26, including the four-ligand notebook
+pipeline. The tested AmberTools distribution also includes auxiliary Python
+tools with incompatible or missing dependencies reported by `pip check` (for
+example, `numpy<2` requirements). Those auxiliary tools are not used by ligtools;
+the successful pipeline check does not establish that every AmberTools utility works. Details
+are recorded in [VALIDATION.md](VALIDATION.md).
+
 ### Development install
 
 ```bash
 git clone https://github.com/Vetrov-Anton/ligtools.git
 cd ligtools
 conda activate ligtools
-pip install -e .
+python -m pip install -e .
 ```
 
 ### Check the installation
