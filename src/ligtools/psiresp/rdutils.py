@@ -3,6 +3,8 @@ import itertools
 import logging
 from typing import TYPE_CHECKING, Set, Tuple, Optional, List
 import warnings
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+import multiprocessing
 
 from typing_extensions import Literal
 import numpy as np
@@ -269,13 +271,17 @@ def generate_conformers(rdmol: "rdkit.Chem.Mol",
         RDKit threads for embedding and optional minimization
     """
     Chem.SanitizeMol(rdmol)
+    n_existing = rdmol.GetNumConformers()
     AllChem.EmbedMultipleConfs(rdmol, numConfs=n_conformers,
-                               pruneRmsThresh=rms_tolerance,
+                               pruneRmsThresh=-1,
                                useRandomCoords=True,
                                clearConfs=False,
                                randomSeed=random_seed,
                                numThreads=n_threads,
                                ignoreSmoothingFailures=True)
+    if rms_tolerance > 0:
+        from ._pruning import prune_conformers
+        prune_conformers(rdmol, n_existing, rms_tolerance, n_threads)
     if minimize:
         minimize_conformer_geometries(rdmol, forcefield=minimize, n_threads=n_threads)
 
@@ -346,14 +352,8 @@ def compute_distance_matrix(coordinates: np.ndarray) -> np.ndarray:
 
 def compute_electrostatic_energy(rdmol: "rdkit.Chem.Mol",
                                  forcefield: Literal["MMFF94", "MMFF94s"] = "MMFF94",
+                                 n_threads: int = 1,
                                  ) -> np.ndarray:
-
-    conformers = np.array([c.GetPositions() for c in rdmol.GetConformers()])
-    distances = compute_distance_matrix(conformers)
-    inverse_distances = np.reciprocal(distances,
-                                      out=np.zeros_like(distances),
-                                      where=~np.isclose(distances, 0))
-
     charges = np.abs(compute_mmff_charges(rdmol)).reshape(-1, 1)
     charge_products = charges @ charges.T
 
@@ -361,21 +361,96 @@ def compute_electrostatic_energy(rdmol: "rdkit.Chem.Mol",
     charge_products[(excl_i, excl_j)] = 0.0
     charge_products[(excl_j, excl_i)] = 0.0
 
-    energies = inverse_distances * charge_products
-    return 0.5 * energies.sum(axis=(1, 2))
+    conformers = list(rdmol.GetConformers())
+    # Bound temporary distance arrays independently of the initial pool size.
+    def block_energy(start):
+        coordinates = np.array([c.GetPositions() for c in conformers[start:start + 32]])
+        distances = compute_distance_matrix(coordinates)
+        inverse = np.reciprocal(distances, out=np.zeros_like(distances),
+                                where=~np.isclose(distances, 0))
+        return 0.5 * (inverse * charge_products).sum(axis=(1, 2))
+
+    starts = range(0, len(conformers), 32)
+    if not conformers:
+        return np.array([])
+    if n_threads > 1 and len(conformers) > 32:
+        with ThreadPoolExecutor(max_workers=n_threads) as pool:
+            return np.concatenate(list(pool.map(block_energy, starts)))
+    return np.concatenate([block_energy(start) for start in starts])
+
+
+_rms_worker_molecule = None
+
+
+def _initialize_rms_worker(binary):
+    from .._parallel import initialize_worker
+    initialize_worker()
+    global _rms_worker_molecule
+    _rms_worker_molecule = Chem.Mol(binary)
+
+
+def _rms_block(molecule, reference, ids, n_threads=1):
+    # GetBestRMS changes probe coordinates; this API leaves them untouched.
+    return np.array([
+        0.0 if probe == reference else AllChem.GetBestAlignmentTransform(
+            molecule, molecule, prbCid=probe, refCid=reference,
+            numThreads=n_threads,
+        )[0] for probe in ids
+    ])
+
+
+def _rms_worker_block(task):
+    reference, ids = task
+    return _rms_block(_rms_worker_molecule, reference, ids)
+
+
+class _RMSRows:
+    """Calculate only the rows needed by greedy selection, without mutating poses."""
+
+    def __init__(self, molecule, ids, n_threads):
+        self.molecule = Chem.RemoveHs(molecule)
+        self.ids = ids
+        self.n_threads = n_threads
+        self.pool = None
+
+    def __enter__(self):
+        if self.n_threads > 1 and len(self.ids) >= 64:
+            self.pool = ProcessPoolExecutor(
+                max_workers=self.n_threads, mp_context=multiprocessing.get_context('spawn'),
+                initializer=_initialize_rms_worker, initargs=(self.molecule.ToBinary(),),
+            )
+        return self
+
+    def row(self, index):
+        reference = self.ids[index]
+        if self.pool is None:
+            return _rms_block(self.molecule, reference, self.ids, self.n_threads)
+        size = max(1, (len(self.ids) + self.n_threads * 4 - 1) // (self.n_threads * 4))
+        tasks = [(reference, self.ids[start:start + size])
+                 for start in range(0, len(self.ids), size)]
+        return np.concatenate(list(self.pool.map(_rms_worker_block, tasks)))
+
+    def __exit__(self, *exc):
+        if self.pool is not None:
+            self.pool.shutdown(wait=True, cancel_futures=True)
 
 
 def compute_heavy_rms(rdmol: "rdkit.Chem.Mol",
-                      conformer_ids=None):
+                      conformer_ids=None, n_threads: int = 1):
     if conformer_ids is None:
         conformer_ids = [c.GetId() for c in rdmol.GetConformers()]
 
     rdmol = Chem.RemoveHs(rdmol)
     n_conformers = len(conformer_ids)
-
+    subset = Chem.Mol(rdmol)
+    subset.RemoveAllConformers()
+    for identifier in conformer_ids:
+        subset.AddConformer(rdmol.GetConformer(identifier), assignId=True)
     rms = np.zeros((n_conformers, n_conformers))
-    for i, j in itertools.combinations(np.arange(n_conformers), 2):
-        rms[i, j] = rms[j, i] = AllChem.GetBestRMS(rdmol, rdmol, conformer_ids[i], conformer_ids[j])
+    if n_conformers > 1:
+        indices = np.tril_indices(n_conformers, -1)
+        rms[indices] = AllChem.GetAllConformerBestRMS(subset, numThreads=n_threads)
+        rms += rms.T
     return rms
 
 
@@ -383,16 +458,17 @@ def select_elf_conformer_ids(rdmol: "rdkit.Chem.Mol",
                              energy_window: float = 30,
                              limit: int = 10,
                              rms_tolerance: float = 0.05,
+                             n_threads: int = 1,
                              ):
     import qcelemental as qcel
     n_conformers = rdmol.GetNumConformers()
-    if n_conformers == 0:
-        return
+    if n_conformers == 0 or limit <= 0:
+        return []
 
     all_conformer_ids = [c.GetId() for c in rdmol.GetConformers()]
 
     try:
-        energies = compute_electrostatic_energy(rdmol, forcefield="MMFF94")
+        energies = compute_electrostatic_energy(rdmol, forcefield="MMFF94", n_threads=n_threads)
     except ValueError as e:
         warnings.warn(str(e))
         return all_conformer_ids[:limit]
@@ -406,18 +482,22 @@ def select_elf_conformer_ids(rdmol: "rdkit.Chem.Mol",
     upper_energy = window + energies[sorting[0]]
     cutoff = np.searchsorted(energies[sorting], upper_energy)
     conformer_ids = [all_conformer_ids[i] for i in sorting[:cutoff]]
-    rms_matrix = compute_heavy_rms(rdmol, conformer_ids)
-
-    n_max_output = min(limit, rms_matrix.shape[0])
+    n_max_output = min(limit, len(conformer_ids))
+    if not n_max_output:
+        return []
     selected_indices = [0]
-    for i in range(n_max_output - 1):
-        selected_rms = rms_matrix[selected_indices]
-        any_too_close = np.any(selected_rms < rms_tolerance, axis=0)
-        if np.all(any_too_close):
-            break
-
-        rmsdist = np.where(any_too_close, -np.inf, selected_rms.sum(axis=0))
-        selected_indices.append(rmsdist.argmax())
+    if n_max_output > 1:
+        with _RMSRows(rdmol, conformer_ids, n_threads) as rows:
+            total_rms = np.zeros(len(conformer_ids))
+            too_close = np.zeros(len(conformer_ids), dtype=bool)
+            for _ in range(n_max_output - 1):
+                row = rows.row(selected_indices[-1])
+                total_rms += row
+                too_close |= row < rms_tolerance
+                too_close[selected_indices] = True
+                if np.all(too_close):
+                    break
+                selected_indices.append(int(np.where(too_close, -np.inf, total_rms).argmax()))
 
     return [conformer_ids[i] for i in selected_indices]
 
@@ -425,9 +505,11 @@ def select_elf_conformer_ids(rdmol: "rdkit.Chem.Mol",
 def select_elf_conformer_coordinates(rdmol: "rdkit.Chem.Mol",
                                      energy_window: float = 15,
                                      limit: int = 10,
-                                     rms_tolerance: float = 0.05,):
+                                     rms_tolerance: float = 0.05,
+                                     n_threads: int = 1):
     ids = select_elf_conformer_ids(rdmol, energy_window=energy_window,
-                                   limit=limit, rms_tolerance=rms_tolerance)
+                                   limit=limit, rms_tolerance=rms_tolerance,
+                                   n_threads=n_threads)
     return np.array([rdmol.GetConformer(i).GetPositions() for i in ids])
 
 
@@ -452,7 +534,8 @@ def generate_diverse_conformer_coordinates(molecule,
     return select_elf_conformer_coordinates(molecule,
                                             energy_window=energy_window,
                                             limit=n_max_conformers,
-                                            rms_tolerance=rms_tolerance)
+                                            rms_tolerance=rms_tolerance,
+                                            n_threads=n_threads)
 
 
 def get_sp3_ch_indices(rdmol):

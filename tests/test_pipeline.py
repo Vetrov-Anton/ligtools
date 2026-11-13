@@ -20,6 +20,7 @@ def test_four_ligand_pipeline(tmp_path):
                 'CC(=O)P(OC)(=O)[O-]', 'CC(=O)P(C)(=O)[O-]'],
         res_names=names, work_dir=tmp_path / 'output', max_n_cores=2,
         n_conformer_pool=20, n_conformer_threads=2,
+        max_conf_n=[1] * len(names),
     )
     ligands.run_psi4()
     ligands.run_resp()

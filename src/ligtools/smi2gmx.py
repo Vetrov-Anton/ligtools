@@ -1,6 +1,6 @@
 """Parameterization of small molecules (ligands) for GROMACS/AMBER.
 
-Takes SMILES strings, runs a RESP2 charge fit with psiresp/Psi4, derives GAFF2
+Takes SMILES strings, runs a RESP charge fit with psiresp/Psi4, derives GAFF2
 parameters with acpype/AmberTools and writes GROMACS `.itp`, `.gro`, `.pdb` and
 `.rtp` files, optionally injecting the new residues into an existing force field
 directory.
@@ -51,7 +51,11 @@ def _to_path(path):
 
 class Smi2Gmx:
     def __init__(self, smiles=[], res_names = [], max_conf_n = [], chiral = [], net_charges=[], ff_path='', atomtypes_filename='', ffnonbonded_filename = '',
-                work_dir = '', max_n_cores = 32, *, n_conformer_pool=4000, n_conformer_threads=1):
+                work_dir = '', max_n_cores = 32, *, n_conformer_pool=4000, n_conformer_threads=1,
+                optimize_geometry=False):
+        if not isinstance(optimize_geometry, bool):
+            raise ValueError('optimize_geometry must be a boolean')
+        self.optimize_geometry = optimize_geometry
         self.smiles = smiles
         self.res_names = res_names
         self.n_mol = len(smiles)
@@ -100,7 +104,7 @@ class Smi2Gmx:
         if smiles:
             self.mols = [
                 psiresp.Molecule.from_smiles(
-                    mol, optimize_geometry=True, conformer_generation_options=conformer_options[i]
+                    mol, optimize_geometry=optimize_geometry, conformer_generation_options=conformer_options[i]
                 )
                 for i, mol in enumerate(self.smiles)
             ]
@@ -207,11 +211,14 @@ class Smi2Gmx:
         
 
     @staticmethod
-    def _run_psi4_input(psi4, input_path):
+    def _run_psi4_input(psi4, input_path, n_threads=1):
         log_path = input_path.with_suffix('.psi4.log')
+        optimization_script = input_path.with_suffix('.opt.py')
+        command = ([psi4, str(optimization_script)] if optimization_script.is_file()
+                   else [psi4, '--qcschema', str(input_path)])
         with log_path.open('w') as log:
             result = subprocess.run(
-                [psi4, '--qcschema', str(input_path), '--nthread', '1'],
+                [*command, '--nthread', str(n_threads)],
                 cwd=input_path.parent, stdout=log, stderr=subprocess.STDOUT,
                 check=False,
             )
@@ -220,19 +227,20 @@ class Smi2Gmx:
                 f'Psi4 exited with code {result.returncode} for {input_path}; log: {log_path}'
             )
 
-    def _run_qm_stage(self, action, psi4, workers):
+    def _run_qm_stage(self, action, psi4, workers, n_threads=1):
         try:
             action()
         except psiresp.qm.QMTasksPending as pending:
             paths = pending.paths
-            print(f'Running {len(paths)} Psi4 calculations with up to {workers} workers')
+            print(f'Running {len(paths)} Psi4 calculations with up to {workers} workers, '
+                  f'{n_threads} threads per calculation')
             if workers == 1:
                 for path in paths:
-                    self._run_psi4_input(psi4, path)
+                    self._run_psi4_input(psi4, path, n_threads)
             else:
                 # Threads only wait for independent external executables.
                 with ThreadPoolExecutor(max_workers=min(workers, len(paths))) as pool:
-                    futures = [pool.submit(self._run_psi4_input, psi4, path) for path in paths]
+                    futures = [pool.submit(self._run_psi4_input, psi4, path, n_threads) for path in paths]
                     try:
                         for future in as_completed(futures):
                             future.result()
@@ -249,8 +257,19 @@ class Smi2Gmx:
                     'see the corresponding .psi4.log files'
                 ) from incomplete
 
-    def run_psi4(self, psi4_path=DEFAULT_PSI4, parallel=True):
-        """Run optimization and single points using Python's external-process scheduler."""
+    def run_psi4(self, psi4_path=DEFAULT_PSI4, parallel=True, *, n_threads=1):
+        """Run QM with n_threads per Psi4 process within the max_n_cores budget.
+
+        parallel=False runs one process at a time, retaining its thread count.
+        MMFF94 conformers supply the geometry unless optimize_geometry=True.
+        """
+        if isinstance(n_threads, bool) or not isinstance(n_threads, int) or n_threads < 1:
+            raise ValueError('n_threads must be a positive integer')
+        if (isinstance(self.max_n_cores, bool) or not isinstance(self.max_n_cores, int)
+                or self.max_n_cores < 1):
+            raise ValueError('max_n_cores must be a positive integer')
+        if n_threads > self.max_n_cores:
+            raise ValueError('n_threads cannot exceed the max_n_cores budget')
         executable = shutil.which(str(Path(psi4_path).expanduser()))
         if executable is None:
             raise FileNotFoundError(f'Psi4 executable not found: {psi4_path}')
@@ -259,13 +278,16 @@ class Smi2Gmx:
             molecules=self.mols, working_directory=str(self.work_dir),
             n_processes=self.max_n_cores,
         )
-        workers = self.max_n_cores if parallel else 1
+        workers = self.max_n_cores // n_threads if parallel else 1
         self.job.generate_conformers()
-        self._run_qm_stage(self.job.optimize_geometries, executable, workers)
+        if any(molecule.optimize_geometry for molecule in self.mols):
+            self._run_qm_stage(self.job.optimize_geometries, executable, workers, n_threads)
         self.job.generate_orientations()
-        self._run_qm_stage(self.job.compute_orientation_energies, executable, workers)
+        self._run_qm_stage(self.job.compute_orientation_energies, executable, workers, n_threads)
 
     def run_resp(self, constraints=[]):
+        if self.job is None:
+            raise RuntimeError('Run run_psi4() before fitting RESP charges')
         if constraints == []:
             constraints = ['auto' for _ in self.res_names]
         self._get_equivalent_atoms()
@@ -284,7 +306,10 @@ class Smi2Gmx:
 
         self.job.charge_constraints = constr
 
-        self.charges = self.job.run()
+        # run_psi4() has already populated the wavefunctions for these exact
+        # orientations. Do not regenerate them or restart QM during fitting.
+        self.job.compute_esps()
+        self.charges = self.job.compute_charges()
 
     def _parallel_acpype(self, i_mol):
         i = i_mol[0]

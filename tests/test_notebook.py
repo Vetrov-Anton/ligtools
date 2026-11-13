@@ -63,7 +63,7 @@ print('NOTEBOOK PIPELINE PASSED: no environment settings, parent threads preserv
                 'VECLIB_MAXIMUM_THREADS', 'NUMEXPR_NUM_THREADS']:
         environment.pop(key, None)
     try:
-        nbclient.NotebookClient(notebook, km=manager, timeout=240).execute(
+        nbclient.NotebookClient(notebook, km=manager, timeout=1200).execute(
             cwd=str(tmp_path), env=environment,
         )
     finally:

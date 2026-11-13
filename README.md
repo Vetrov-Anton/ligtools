@@ -7,7 +7,7 @@ Two independent tools:
 
 | Tool | What it does | Needs |
 | --- | --- | --- |
-| **`Smi2Gmx`** | SMILES -> GAFF2 topology with RESP2 charges (`.itp`, `.gro`, `.pdb`, `.rtp`) | Psi4, psiresp, AmberTools, acpype |
+| **`Smi2Gmx`** | SMILES -> GAFF2 topology with RESP charges (`.itp`, `.gro`, `.pdb`, `.rtp`) | Psi4, psiresp, AmberTools, acpype |
 | **`CoordMatcher`** | Move a ligand onto a reference pose and rebuild the complex | RDKit, ParmEd, NumPy only |
 
 ```python
@@ -23,7 +23,7 @@ does not pull in Psi4, psiresp or acpype.
 have to run them by hand:
 
 ```
-SMILES -> RDKit/psiresp conformers -> Psi4 (QM) -> RESP2 charges -> acpype/GAFF2 -> .itp / .gro / .pdb / .rtp
+SMILES -> RDKit/MMFF94 -> conformer selection -> Psi4 single points -> RESP -> acpype/GAFF2 -> .itp / .gro / .pdb / .rtp
 ```
 
 The result is a set of GROMACS topology files, and optionally a force field directory with the
@@ -34,8 +34,8 @@ new residues already injected (`.rtp` entries, new atom types in `atomtypes.atp`
 
 ## Features
 
-- Conformer generation and geometry optimization driven by [psiresp](https://psiresp.readthedocs.io) + [Psi4](https://psicode.org)
-- **RESP2** charge fitting with automatic detection of symmetry-equivalent atoms
+- RDKit/MMFF94 conformers, Psi4 single points and optional QM geometry optimization via the maintained psiresp backend
+- **RESP** charge fitting with automatic detection of symmetry-equivalent atoms
   (topologically equivalent atoms get identical charges)
 - Net-charge constraints per molecule, or fully custom charge-equivalence groups
 - GAFF2 atom types and bonded parameters via [acpype](https://github.com/alanwilter/acpype) / AmberTools
@@ -69,14 +69,35 @@ The code originally released as psiresp 0.4.2 and acpype 2023.10.27 now lives in
 `src/ligtools/psiresp/` and `src/ligtools/acpype/`. It is built and versioned with
 ligtools, without upstream setup.py, Versioneer, or bundled Amber executables.
 
+Smi2Gmx currently uses gas-phase HF/6-31G* and two-stage RESP. The RESP2
+vacuum/solvent mixing protocol is not enabled by this interface.
+
 The RESP backend uses Pydantic 2 and QCElemental's explicit v2 models, NumPy
 `isin`, and SciPy's public sparse solver. QCSchema v1 conversion is kept at the
-Psi4 file boundary. Pydantic 1 and the old `qcelemental<0.50` constraint are no
+Psi4 single-point file boundary; local optimization uses QCSchema v2.
+Pydantic 1 and the old `qcelemental<0.50` constraint are no
 longer required. ACPYPE resolves AmberTools from the active environment.
 
+By default, Smi2Gmx uses the selected RDKit/MMFF94 geometries directly for Psi4
+single-point wavefunction and ESP calculations. It does not run QM geometry
+optimization. To enable it explicitly, construct
+`Smi2Gmx(..., optimize_geometry=True)`. In that mode, `psi4.optimize` must converge
+before the final coordinates are passed on; failure stops the pipeline. Old
+single-gradient optimization caches are excluded. Restart the notebook kernel
+and create a fresh `Smi2Gmx` instance after upgrading.
+
+When QM geometry optimization is enabled, it uses explicit maximum/RMS force and displacement
+thresholds of `1e-3`, in OptKing's internal-coordinate atomic units. Length
+coordinates use hartree/bohr and bohr; angular coordinates use hartree/radian and
+radians. `QMGeometryOptimizationOptions(convergence_tolerance=None)` restores
+the named `g_convergence` preset (default `gau_tight`). Individual explicit
+`*_g_convergence` Psi4 keywords override the common tolerance. The iteration
+limit and Hessian frequency are separate settings. The energy-change criterion
+remains inactive by default.
+
 See [THIRD_PARTY.md](THIRD_PARTY.md) for provenance, licenses, and maintenance
-instructions. These changes preserve the existing scientific configuration;
-they do not change the charge-fitting method or its defaults.
+instructions. The charge-fitting method remains two-stage RESP; by default it
+now uses MMFF94 geometries instead of QM-optimized geometries.
 
 ---
 
@@ -160,7 +181,12 @@ fresh Python interpreters with the local `spawn` context. Their BLAS/OpenMP thre
 limits are applied inside the workers, without changing the notebook environment
 or the thread count used by RDKit conformer generation.
 
-`max_n_cores` limits the number of ESP, QM and ACPYPE workers. Existing ESP
+`max_n_cores` limits ESP/ACPYPE workers and the total QM thread budget.
+`run_psi4(n_threads=8)` uses eight threads per Psi4 process; set
+`max_n_cores=8` to run one such process at a time. With `parallel=True`, at most
+`max_n_cores // n_threads` QM processes run concurrently. `parallel=False`
+retains the requested thread count and runs one process at a time. The default
+is one thread per Psi4 process. Existing ESP
 results are reused without starting a worker pool. A notebook example is in
 [`examples/parameterize.ipynb`](examples/parameterize.ipynb).
 
@@ -177,10 +203,13 @@ ligands = Smi2Gmx(
     smiles=['CC(=O)C(=O)[O-]', 'CC(=O)P(C)(=O)[O-]'],
     res_names=['PYR', 'MPI'],
     work_dir='./output_param/',
+    n_conformer_threads=8,          # RDKit/MMFF94/pruning worker limit
+    max_n_cores=8,                  # Total QM thread budget
+    optimize_geometry=False,       # Default: keep the MMFF94 geometries
 )
 
-ligands.run_psi4()                  # 1. QM optimization + single points
-ligands.run_resp()                  # 2. RESP2 charge fit
+ligands.run_psi4(n_threads=8)       # 1. Eight threads per QM single point
+ligands.run_resp()                  # 2. RESP charge fit
 ligands.run_acpype(parallel=False)  # 3. GAFF2 parameters
 
 ligands.get_itps()                  # 4. GROMACS topologies with the fitted charges
@@ -188,14 +217,16 @@ ligands.get_gros()
 ligands.get_pdbs()
 ligands.get_rtps()
 
-# 5. optional: add the residues to an existing force field
+# 5. optional: add residues to a COPY of your force field (modifies that directory)
 ligands.get_ff_with_rtps(ff_path='./amber99sb-ildn.ff')
 ```
 
 A complete, commented script is in [`examples/parameterize.py`](examples/parameterize.py).
 
-> The QM step is the expensive one. Four small ligands with 5 conformers each take on the order
-> of hours on a workstation; plan accordingly and prefer `parallel=True` on a multi-core machine.
+The MMFF94 workflow was checked through force-field RTP export for API, MPO and
+MPI (44.2 seconds total on the audit workstation) and for TPP with net charge -2.
+Runtime depends on molecule size and selected conformer count. Optional QM
+geometry optimization can take substantially longer; see [VALIDATION.md](VALIDATION.md).
 
 ---
 
@@ -203,28 +234,30 @@ A complete, commented script is in [`examples/parameterize.py`](examples/paramet
 
 | Step | Method | What happens |
 | --- | --- | --- |
-| 1 | `run_psi4()` | psiresp generates conformers, Psi4 optimizes them and computes the ESP grid. Python schedules the external Psi4 processes directly, up to `max_n_cores` at once. Each calculation has a `.psi4.log`; failed exit codes and failed QCSchema results raise an error. No shell or GNU `parallel` is used. |
+| 1 | `run_psi4()` | Generate and select MMFF94 conformers, then compute Psi4 orientation wavefunctions at fixed geometry. QM optimization runs only with `optimize_geometry=True`. Python schedules up to `max_n_cores // n_threads` processes at once. Each calculation has a `.psi4.log`; failed exits/results raise errors. |
 | 2 | `run_resp()` | Symmetry-equivalent atoms are found with `Chem.CanonicalRankAtoms` on a "flattened" copy of the molecule (all bonds single, no formal charges), so e.g. the three methyl hydrogens or the two carboxylate oxygens share one charge. Net charge is constrained per molecule. |
-| 3 | `run_acpype()` | Each molecule is written as a PDB with the requested residue name and passed to acpype (`chargeType='user'`), which derives GAFF2 atom types and bonded parameters. |
-| 4 | `get_*()` | Results are collected; `get_itps()` overwrites acpype's charges with the RESP2 ones. |
+| 3 | `run_acpype()` | Each molecule is written as a PDB with the requested residue name and passed to acpype for GAFF2 parameters. With PDB input, ACPYPE falls back from `chargeType='user'` to an internal AM1-BCC calculation. Final exported ITP/RTP charges are replaced with RESP charges. |
+| 4 | `get_*()` | Results are collected; `get_itps()` overwrites acpype's charges with the RESP ones. |
 | 5 | `get_ff_with_rtps()` | New atom types are appended to `atomtypes.atp` and `ffnonbonded.itp`, and one `.rtp` file per residue is copied into the force field directory. |
 
 ### Layout of `work_dir`
 
 ```
 work_dir/
-├── optimization/     # psiresp/Psi4 geometry optimization
+├── optimization/     # Present only when QM geometry optimization is enabled
 ├── single_point/     # psiresp/Psi4 single points
 ├── temporary_pdbs/   # input PDBs handed to acpype
 ├── acpype/           # <RES>.acpype/ directories produced by acpype
-├── itps/             # <RES>_GMX.itp  (RESP2 charges)
+├── itps/             # <RES>_GMX.itp  (RESP charges)
 ├── gros/             # <RES>_GMX.gro
 ├── pdbs/             # <RES>.pdb
 └── rtps/             # <RES>.rtp
 ```
 
-Because every step writes to disk, an interrupted run can be resumed by re-running the script:
-finished stages are picked up from `work_dir` instead of being recomputed.
+Rerunning with the same options and `work_dir` regenerates conformers and reuses
+matching completed QM files. ESP/RESP and exports may run again. An interrupted
+geometry optimization restarts from its input; there is no automatic continuation
+from its last geometry step. Use a new work directory for an independent run.
 
 ---
 
@@ -238,14 +271,15 @@ finished stages are picked up from `work_dir` instead of being recomputed.
 | `res_names` | `[]` | GROMACS residue name per molecule (required). |
 | `max_conf_n` | `5` each | Maximum number of conformers per molecule. |
 | `n_conformer_pool` | `4000` | Initial conformer candidates per molecule, before filtering; a positive integer or a list with one positive integer per SMILES. |
-| `n_conformer_threads` | `1` | Positive number of RDKit threads for conformer embedding and optional force-field minimization. |
+| `n_conformer_threads` | `1` | Positive worker limit for embedding, force-field minimization, energy scoring and RMSD selection. |
+| `optimize_geometry` | `False` | Enable optional Psi4 geometry optimization after MMFF94 selection. The default uses MMFF94 coordinates directly for QM single points and ESP. |
 | `chiral` | `False` each | Pass acpype's chirality flag for that molecule. |
 | `net_charges` | from SMILES | Total charge per molecule; overrides the value RDKit infers. |
 | `ff_path` | `''` | Force field directory used by `get_ff_with_rtps()` when it is called without arguments. |
 | `atomtypes_filename` | `''` | Stored for reference (see note below). |
 | `ffnonbonded_filename` | `''` | Stored for reference (see note below). |
 | `work_dir` | `./tmp_Smi2Gmx` | Working directory for all intermediate and output files. |
-| `max_n_cores` | `32` | Upper bound on parallel workers for QM, ESP and ACPYPE. |
+| `max_n_cores` | `32` | Total thread budget for QM; upper bound on parallel workers for ESP and ACPYPE. |
 
 All path arguments accept `str` or `pathlib.Path`, relative or absolute, with `~` expansion;
 they are resolved to absolute paths on construction.
@@ -264,21 +298,36 @@ ligands = Smi2Gmx(
 )
 ```
 
-Embedding can produce fewer candidates because RDKit prunes similar geometries
-or cannot embed a requested conformation. Molecules are processed in sequence;
+Embedding can produce fewer candidates because similar geometries are pruned
+or RDKit cannot embed a requested conformation. Generated candidates are minimized
+with MMFF94 by default before energy-window and RMSD selection. The selected
+coordinates are used directly for Psi4 single points; subsequent QM geometry
+optimization is optional (`optimize_geometry=True`). MMFF94 minimization applies
+to the psiresp pipeline; CoordMatcher does not perform force-field minimization.
+Molecules are processed in sequence;
 `n_conformer_threads` controls RDKit threads within each molecule and requires a
-build of RDKit with thread support. Energy and RMSD selection still run serially,
-so increasing this setting does not accelerate every part of conformer selection.
+build of RDKit with thread support. Energy scoring uses bounded blocks and
+threads. RMSD selection computes only distances to already selected conformers,
+using spawned processes for larger candidate sets and native RDKit threads for
+small sets. This avoids a full pairwise distance matrix. Notebook users do not
+need thread environment variables. Embedding-time RMSD pruning is performed
+separately in bounded parallel batches, using RDKit's atom-symmetry mappings,
+strict threshold and original acceptance order. A rotation/permutation-invariant
+lower bound skips provably distant pairs before exact alignment. The greedy
+acceptance decisions remain sequential; a worker limit does not guarantee
+continuous use of every core. With only one retained conformer, only one Psi4
+process can run; `run_psi4(n_threads=8)` lets that process use eight threads
+when `max_n_cores` is at least eight.
 
 ### Methods
 
 | Method | Description |
 | --- | --- |
 | `draw_smiles(charge=True, index=True, molsPerRow=3, subImgSize=(500, 500))` | Draw the molecules in a Jupyter notebook; after `run_resp()` the atoms are annotated with their partial charges and indices. |
-| `run_psi4(psi4_path=DEFAULT_PSI4, parallel=True)` | Run the QM stage. `psi4_path` may be a bare executable name (looked up on `$PATH`) or a full path. |
-| `run_resp(constraints=[])` | Fit RESP2 charges. Per molecule pass `'auto'` (symmetry detected automatically, the default), `'no'` (no equivalence constraints) or a list of index tuples for custom groups. |
+| `run_psi4(psi4_path=DEFAULT_PSI4, parallel=True, *, n_threads=1)` | Run the QM stage with a positive integer thread count per Psi4 process, no greater than `max_n_cores`. `psi4_path` may be a bare executable name or a full path. |
+| `run_resp(constraints=[])` | Fit RESP charges. Per molecule pass `'auto'` (symmetry detected automatically, the default), `'no'` (no equivalence constraints) or a list of index tuples for custom groups. |
 | `run_acpype(parallel=True)` | Run acpype for every molecule. |
-| `get_itps(dir='')` | Write `.itp` files with the RESP2 charges substituted in. |
+| `get_itps(dir='')` | Write `.itp` files with the RESP charges substituted in. |
 | `get_gros(dir='')` | Copy acpype's `.gro` files. |
 | `get_pdbs(dir='')` | Convert the `.gro` files to `.pdb`. |
 | `get_rtps(dir='')` | Write GROMACS `.rtp` residue entries (bonds, angles, dihedrals, impropers converted to GROMACS units). |
@@ -320,16 +369,30 @@ cm.get_complex(output='new_start.pdb', scaffold='complex.pdb', pdb_names=['PYR']
 | 3 | `ONE_SHAPE` | Rigid-body fit maximizing shape overlap (`rdShapeAlign`). Useful when probe and reference are different molecules. | no |
 | 4 | `SHAPES` | Generate conformers from SMILES, keep the best shape + color overlap. | yes |
 
-Defaults to mode 3 when no SMILES were given, mode 4 otherwise. Modes 0, 1 and 3 preserve or
-rigidly move the probe geometry; modes 2 and 4 replace it with a generated conformer, so expect
-the bond lengths and angles to come from RDKit's force field rather than from your topology.
+Defaults to mode 3 when no SMILES were given, mode 4 otherwise. Mode 0 copies the reference
+geometry; modes 1 and 3 rigidly move the probe; modes 2 and 4 replace it with a generated conformer, so expect
+the bond lengths and angles to come from RDKit's conformer embedding rather than from your topology.
+
+All modes preserve the original probe's atom count, order, names and residues in
+the output. Existing hydrogens are retained; there is no option to add hydrogens
+to the input PDB or to optimize its geometry. The former `addHs_to_probe`,
+`addHs_to_ref` and `opt_geom` parameters have been removed. Modes 2 and 4 use
+explicit hydrogens only in the temporary SMILES molecule used by RDKit; only
+atoms mapped to the original probe are written back.
+
+MCS fits use heavy atoms. SMILES mapping first respects chemical bond orders
+and falls back to topology for PDBs without bond-order information. Symmetric
+atoms can have multiple equivalent mappings. Invalid inputs or missing matches
+raise an error instead of silently producing an incomplete structure. `outputs`
+is supported in all five modes.
 
 ### Methods
 
 | Method | Description |
 | --- | --- |
-| `align(modes=[], n_confs=1000, n_cores=16, opt_param=0.5, opt_geom=False, seed=80, addHs_to_probe=[], addHs_to_ref=[], outputs=None, draw=True)` | Align every probe onto its reference. Results are collected in `self.pmd_objs`; pass `outputs` to also write them. `draw=False` skips the RDKit depictions (use it outside Jupyter). |
+| `align(modes=None, n_confs=1000, n_cores=16, opt_param=0.5, seed=80, outputs=None, draw=False)` | Align every probe onto its reference. Results are collected in `self.pmd_objs`; pass `outputs` to also write them. Drawing is disabled by default; pass `draw=True` to show RDKit depictions. |
 | `get_pdbs(filenames)` | Write the aligned structures to the given file names. |
+| `get_pmd()` | Return a list of ParmEd structures: original probes before alignment, aligned results afterwards. Originals are loaded on first access. Structure objects are returned by reference; the list itself is separate. |
 | `get_complex(output='new_start.pdb', scaffold='', pdb_names=[], water=[], ions=[])` | Rebuild a complex: scaffold minus the residues named in `pdb_names`, plus the aligned ligands, plus ions and water. Extra residue names can be declared with `water=` and `ions=`; `HOH` and `NA/CL/CA/MG` are always included. |
 
 ## Notes and caveats

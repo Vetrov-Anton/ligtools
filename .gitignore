@@ -16,6 +16,7 @@ tmp_Smi2Gmx/
 output_param/
 *.acpype/
 temporary_pdbs/
+psiresp_working_directory/
 
 # Local backup of the pre-refactor script, not part of the package
 smi2gmx_old.py

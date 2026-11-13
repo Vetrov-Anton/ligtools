@@ -71,7 +71,7 @@ class ConformerGenerationOptions(base.Model):
     )
 
     minimize: Optional[Literal["uff", "mmff94"]] = Field(
-        default=None,
+        default="mmff94",
         description="Whether to minimize geometries with the specified force field"
     )
 

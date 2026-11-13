@@ -42,37 +42,41 @@ def pending_stage(paths):
     return action
 
 
-@pytest.mark.parametrize('parallel, expected_overlap', [(False, 1), (True, 2)])
-def test_public_scheduler_and_resume(tmp_path, monkeypatch, fake_psi4, parallel, expected_overlap):
+@pytest.mark.parametrize('parallel, budget, threads, expected_overlap', [
+    (False, 2, 1, 1), (True, 2, 1, 2),
+    (True, 8, 8, 1), (False, 8, 8, 1),
+    (True, 8, 2, 4), (True, 7, 2, 3),
+])
+def test_public_scheduler_and_resume(tmp_path, monkeypatch, fake_psi4, parallel, budget, threads, expected_overlap):
     import ligtools.smi2gmx as module
 
-    paths = [tmp_path / f'job {i} $(touch PWNED).msgpack' for i in range(5)]
+    paths = [tmp_path / f'job {i} $(touch PWNED).msgpack' for i in range(7)]
     for path in paths:
         path.write_text('success')
 
     class Job:
         def __init__(self, **kwargs):
-            assert kwargs['n_processes'] == 2
+            assert kwargs['n_processes'] == budget
 
         def generate_conformers(self):
             pass
 
         def optimize_geometries(self):
-            pending_stage(paths[:3])()
+            pending_stage(paths[:5])()
 
         def generate_orientations(self):
-            assert all(path.with_suffix('.done').exists() for path in paths[:3])
+            assert all(path.with_suffix('.done').exists() for path in paths[:5])
 
         def compute_orientation_energies(self):
-            pending_stage(paths[3:])()
+            pending_stage(paths[5:])()
 
     monkeypatch.setattr(module.psiresp, 'Job', Job)
-    ligands = Smi2Gmx(smiles=['O'], res_names=['HOH'], max_n_cores=2)
-    ligands.run_psi4(psi4_path=fake_psi4, parallel=parallel)
+    ligands = Smi2Gmx(smiles=['O'], res_names=['HOH'], max_n_cores=budget, optimize_geometry=True)
+    ligands.run_psi4(psi4_path=fake_psi4, parallel=parallel, n_threads=threads)
     events = []
     for path in paths:
         record = json.loads(path.with_suffix('.done').read_text())
-        assert record['argv'] == ['--qcschema', str(path), '--nthread', '1']
+        assert record['argv'] == ['--qcschema', str(path), '--nthread', str(threads)]
         assert path.with_suffix('.psi4.log').exists()
         events.extend([(record['start'], 1), (record['end'], -1)])
     running = maximum = 0
@@ -80,10 +84,11 @@ def test_public_scheduler_and_resume(tmp_path, monkeypatch, fake_psi4, parallel,
         running += change
         maximum = max(maximum, running)
     assert maximum == expected_overlap
+    assert maximum * threads <= budget
     assert not (tmp_path / 'PWNED').exists()
     # Finished calculations are reused rather than executed a second time.
     before = [path.with_suffix('.done').read_bytes() for path in paths]
-    ligands.run_psi4(psi4_path=fake_psi4, parallel=parallel)
+    ligands.run_psi4(psi4_path=fake_psi4, parallel=parallel, n_threads=threads)
     assert before == [path.with_suffix('.done').read_bytes() for path in paths]
 
 
@@ -110,3 +115,9 @@ def test_unrelated_errors_are_not_swallowed(error):
 def test_missing_executable():
     with pytest.raises(FileNotFoundError, match='Psi4 executable'):
         Smi2Gmx().run_psi4(psi4_path='/nonexistent/ligtools-test-psi4')
+
+
+@pytest.mark.parametrize('threads', [0, -1, 1.5, True, 9])
+def test_invalid_qm_thread_count(threads, fake_psi4):
+    with pytest.raises(ValueError, match='n_threads'):
+        Smi2Gmx(max_n_cores=8).run_psi4(psi4_path=fake_psi4, n_threads=threads)

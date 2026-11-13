@@ -8,6 +8,38 @@ import qcelemental as qcel
 from ligtools import Smi2Gmx, psiresp
 from ligtools.acpype import topol
 from ligtools.psiresp.qm import QMEnergyOptions
+from ligtools.psiresp.qcutils import QCWaveFunction
+
+
+def test_wavefunction_loading_does_not_infer_chemical_structure(monkeypatch):
+    from ligtools.psiresp import rdutils
+    qcmol = psiresp.Molecule.from_smiles(
+        'CC1=C(SC=[N+]1CC2=CN=C(N=C2N)C)CCOP(=O)([O-])OP(=O)([O-])[O-]'
+    ).qcmol.model_copy(update={'extras': {}})
+    count = len(qcmol.symbols)
+    wavefunction = qcel.models.v2.WavefunctionProperties(
+        basis={'name': 'synthetic', 'atom_map': ['s'] * count, 'center_data': {
+            's': {'electron_shells': [{'angular_momentum': [0], 'harmonic_type': 'cartesian',
+                                     'exponents': [1.0], 'coefficients': [[1.0]]}]},
+        }}, restricted=True, scf_orbitals_a=np.eye(count), orbitals_a='scf_orbitals_a',
+    )
+    result = qcel.models.v2.AtomicResult(
+        input_data=qcel.models.v2.AtomicInput(molecule=qcmol, specification={
+            'program': 'psi4', 'driver': 'energy', 'model': {'method': 'hf', 'basis': 'synthetic'},
+            'protocols': {'wavefunction': 'all'},
+        }), molecule=qcmol, wavefunction=wavefunction,
+        properties={'calcinfo_nalpha': 1, 'return_energy': -1.0}, return_result=-1.0,
+        provenance={'creator': 'test', 'version': '1', 'routine': 'energy'},
+    )
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError('Reading a wavefunction must not call RDKit graph reconstruction')
+
+    monkeypatch.setattr(rdutils, 'rdmol_from_qcelemental', unexpected)
+    loaded = QCWaveFunction.from_atomicresult(result)
+    np.testing.assert_array_equal(loaded.qcmol.geometry, qcmol.geometry)
+    density = loaded.reconstruct_density()
+    np.testing.assert_allclose(density, np.diag([1.0] + [0.0] * (count - 1)))
 
 
 def test_local_modules_and_no_numpy_patch():

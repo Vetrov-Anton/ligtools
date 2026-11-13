@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ligtools"
 version = "0.2.0"
-description = "Ligand preparation for GROMACS/AMBER: SMILES to GAFF2 topologies with RESP2 charges, plus coordinate alignment onto a reference structure"
+description = "Ligand preparation for GROMACS/AMBER: SMILES to GAFF2 topologies with RESP charges, plus coordinate alignment onto a reference structure"
 readme = "README.md"
 requires-python = ">=3.11,<3.15"
 license = "GPL-3.0-only"

@@ -3,7 +3,7 @@
 Two independent tools that are usually used one after the other:
 
 - :class:`Smi2Gmx` turns SMILES into GROMACS topologies (`.itp`, `.rtp`) with
-  RESP2 charges and GAFF2 parameters, via Psi4, psiresp and acpype.
+  RESP charges and GAFF2 parameters, via Psi4, psiresp and acpype.
 - :class:`CoordMatcher` moves the resulting ligand into the coordinate frame of
   a reference structure, and rebuilds the complex around it.
 

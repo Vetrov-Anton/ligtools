@@ -2,7 +2,7 @@
 
 Run it from a directory that contains the force field you want to extend::
 
-    python example.py
+    python examples/parameterize.py
 
 Every step writes into `work_dir`, so an interrupted run can be resumed by
 re-running the script.
@@ -27,16 +27,18 @@ def main():
         res_names=list_names,
         work_dir='./output_param/',
         n_conformer_pool=4000,     # Initial candidates per molecule, before filtering
-        n_conformer_threads=4,     # RDKit embedding threads
+        n_conformer_threads=8,     # RDKit/MMFF94/pruning workers
+        max_n_cores=8,             # Total QM thread budget
+        optimize_geometry=False,  # Keep the selected MMFF94 geometries
     )
 
     # Draw the input molecules (Jupyter/IPython only)
     ligands.draw_smiles()
 
-    # 1. QM: geometry optimization + single points with Psi4
-    ligands.run_psi4()
+    # 1. QM single points on selected MMFF94 geometries (no QM optimization by default)
+    ligands.run_psi4(n_threads=8)
 
-    # 2. Fit RESP2 charges under symmetry and net-charge constraints
+    # 2. Fit RESP charges under symmetry and net-charge constraints
     ligands.run_resp()
 
     # 3. Assign GAFF2 parameters with acpype/antechamber
@@ -51,7 +53,7 @@ def main():
     ligands.get_pdbs()
     ligands.get_rtps()
 
-    # 5. Add the new residues to an existing GROMACS force field directory
+    # 5. Add residues to a COPY of a GROMACS force field; this modifies that directory
     ligands.get_ff_with_rtps(ff_path='./amber-99sb-ildn.ff')
 
 

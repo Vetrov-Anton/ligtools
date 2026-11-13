@@ -16,7 +16,7 @@ cm = CoordMatcher(
 )
 
 # mode 1 = rigid fit over the maximum common substructure, keeps the geometry
-# that came with the topology. Use draw=False outside Jupyter.
+# that came with the topology. Drawing is disabled by default.
 cm.align(modes=[1], outputs=['PYR_aligned.pdb'], draw=False)
 
 # Replace the old ligand copy in the complex with the aligned one, keeping

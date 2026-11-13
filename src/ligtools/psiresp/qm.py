@@ -4,6 +4,7 @@ import pathlib
 import logging
 import sys
 import shlex
+import hashlib
 from typing import List, Optional, Dict, Any, Union
 
 import numpy as np
@@ -318,7 +319,12 @@ class BaseQMOptions(Model):
                     results.append(result)
         if to_execute:
             logger.debug(f"{len(to_execute)} calculations remaining")
-            lines = ["#!/usr/bin/env bash"] + [f"psi4 --qcschema {shlex.quote(path.name)}" for path in to_execute]
+            lines = ["#!/usr/bin/env bash"] + [
+                (f'psi4 {shlex.quote(path.with_suffix(".opt.py").name)}'
+                 if path.with_suffix('.opt.py').is_file()
+                 else f'psi4 --qcschema {shlex.quote(path.name)}')
+                for path in to_execute
+            ]
             runfile = self.get_run_file(working_directory)
             with runfile.open("w") as f:
                 f.write("\n".join(lines))
@@ -353,7 +359,9 @@ class BaseQMOptions(Model):
             if kw in data:
                 data["provenance"][kw] = data[kw]
         data.pop("return_output", None)
-        if data.get("schema_version", 1) == 1:
+        if data.get('schema_name') == 'qcschema_optimization_result':
+            result = qcel.models.v2.OptimizationResult(**data)
+        elif data.get("schema_version", 1) == 1:
             if sys.version_info >= (3, 14):
                 from qcelemental.models import _v1v2 as legacy
             else:
@@ -403,7 +411,13 @@ class QMGeometryOptimizationOptions(BaseQMOptions):
 
     g_convergence: QMGConvergence = Field(
         default="gau_tight",
-        description="Criteria for concluding geometry optimization",
+        description="Convergence preset used when convergence_tolerance is None",
+    )
+    convergence_tolerance: Optional[float] = Field(
+        default=1e-3, gt=0, allow_inf_nan=False,
+        description=("Default maximum/RMS force and displacement thresholds in internal-coordinate "
+                     "atomic units; None restores g_convergence preset thresholds. "
+                     "Individual explicit Psi4 keywords take precedence."),
     )
 
     driver: str = "gradient"
@@ -423,6 +437,32 @@ class QMGeometryOptimizationOptions(BaseQMOptions):
                      "N means to compute every N steps."),
     )
 
+    def get_hash(self):
+        # Never reuse old single-gradient files as converged optimizations.
+        return hashlib.sha1((super().get_hash() + ':psi4-optimize-v1').encode()).hexdigest()
+
+    def write_input(self, qcmol, working_directory='.', **kwargs):
+        infile = self.get_job_file_for_molecule(qcmol, working_directory, make_directory=True)
+        compute = qcel.models.v2.OptimizationInput(
+            initial_molecule=qcmol,
+            specification={
+                'program': 'optking',
+                'protocols': {'trajectory_results': 'none'},
+                'specification': {
+                    'program': 'psi4', 'driver': 'gradient',
+                    'model': {'method': self.method, 'basis': self.basis},
+                    'keywords': self.generate_keywords(),
+                },
+            },
+        )
+        infile.write_bytes(compute.serialize('msgpack-ext'))
+        helper = pathlib.Path(__file__).with_name('_optimization.py').resolve()
+        infile.with_suffix('.opt.py').write_text(
+            'import runpy\n'
+            f"runpy.run_path({str(helper)!r})['run_optimization']({str(infile.resolve())!r})\n"
+        )
+        return infile
+
     def add_compute(self,
                     client: "qcfractal.interface.FractalClient",
                     qcmols: List[qcel.models.v2.Molecule] = [],
@@ -436,12 +476,18 @@ class QMGeometryOptimizationOptions(BaseQMOptions):
         return response
 
     def generate_keywords(self):
-        keywords = deepcopy(self.keywords)
+        keywords = super().generate_keywords()
         keywords.update({
             "geom_maxiter": self.max_iter,
             "full_hess_every": self.full_hess_every,
             "g_convergence": self.g_convergence
         })
+        if self.convergence_tolerance is not None:
+            specified = {name.lower() for name in keywords}
+            for name in ('max_force_g_convergence', 'rms_force_g_convergence',
+                         'max_disp_g_convergence', 'rms_disp_g_convergence'):
+                if name not in specified:
+                    keywords[name] = self.convergence_tolerance
         return keywords
 
     def wait_for_results(self, client, response_ids=[],
@@ -455,7 +501,13 @@ class QMGeometryOptimizationOptions(BaseQMOptions):
         return results
 
     def _postprocess_result(self, result):
-        return result.molecule.geometry
+        if not isinstance(result, qcel.models.v2.OptimizationResult):
+            raise ValueError('Expected a converged optimization result, not a single gradient')
+        if result.extras.get('ligtools_optimizer') != 'psi4-optimize-v1' or not result.extras.get('converged'):
+            raise ValueError('Local geometry optimization has no convergence confirmation')
+        if result.final_molecule is None:
+            raise ValueError('Geometry optimization did not return a final molecule')
+        return result.final_molecule.geometry
 
     def _postprocess_record(self, record):
         return record.get_final_molecule().geometry

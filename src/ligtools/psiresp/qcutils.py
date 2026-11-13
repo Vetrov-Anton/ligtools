@@ -10,6 +10,12 @@ class QCWaveFunction(BaseMolecule):
     energy: float
     basis: str
 
+    def __post_init__(self, **kwargs):
+        # QM output supplies coordinates, basis and orbitals. It need not carry
+        # a chemical graph or mapped SMILES, and no bond/charge inference is
+        # required to reconstruct its density or compute ESP.
+        pass
+
     @classmethod
     def from_atomicresult(cls, result):
         return cls(qc_wavefunction=result.wavefunction,
